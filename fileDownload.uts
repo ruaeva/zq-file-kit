@@ -1,0 +1,81 @@
+/**
+ * zq-file-kit / fileDownload.uts
+ *
+ * 通用文件下载/打开工具（可整体拷贝到其它 uni-app x 项目）。
+ *
+ * 两条链路：
+ * 1. openInBrowser(url)：跳转系统浏览器打开链接（压缩包等触发浏览器下载）。
+ *    依赖 DCloud 官方插件 uts-openSchema（需先在 HBuilderX 插件市场导入）。
+ * 2. downloadToLocal(url, name)：下载到本地后回调 tempFilePath（可继续 openDocument 预览）。
+ *
+ * 依赖：uni 内置 API；浏览器下载依赖 uni_modules/uts-openSchema。
+ */
+
+// #ifdef UNI-APP-X
+import { openSchema, canOpenURL } from '@/uni_modules/uts-openSchema'
+// #endif
+
+/** 判断是否为 http/https 远程链接。 */
+export function isRemoteUrl(url : string) : boolean {
+	return url.indexOf('http://') == 0 || url.indexOf('https://') == 0
+}
+
+/** 跳转系统浏览器打开链接（下载/预览由浏览器决定）。 */
+export function openInBrowser(url : string) : void {
+	if (!isRemoteUrl(url)) {
+		uni.showToast({ title: '链接无效，无法打开', icon: 'none' })
+		return
+	}
+	// #ifdef UNI-APP-X
+	if (canOpenURL(url)) {
+		openSchema(url)
+	} else {
+		uni.showToast({ title: '当前设备无法打开该链接', icon: 'none' })
+	}
+	// #endif
+	// #ifndef UNI-APP-X
+	uni.showToast({ title: '请升级到支持浏览器打开的版本', icon: 'none' })
+	// #endif
+}
+
+/** 下载远程文件到本地，成功回调 tempFilePath。 */
+export function downloadToLocal(url : string, onDone : (tempFilePath : string) => void, onError ?: (message : string) => void) : void {
+	uni.showLoading({ title: '正在下载' })
+	uni.downloadFile({
+		url: url,
+		success: (result) => {
+			uni.hideLoading()
+			if (result.statusCode >= 200 && result.statusCode < 300) {
+				onDone(result.tempFilePath)
+			} else {
+				const msg = '文件下载失败'
+				if (onError != null) {
+					onError(msg)
+				} else {
+					uni.showToast({ title: msg, icon: 'none' })
+				}
+			}
+		},
+		fail: () => {
+			uni.hideLoading()
+			const msg = '文件下载失败'
+			if (onError != null) {
+				onError(msg)
+			} else {
+				uni.showToast({ title: msg, icon: 'none' })
+			}
+		}
+	})
+}
+
+/** 下载后用系统文档预览器打开（App 端会调起「打开方式」选择应用）。 */
+export function downloadAndOpen(url : string, fileType ?: string) : void {
+	downloadToLocal(url, (tempFilePath : string) => {
+		uni.openDocument({
+			filePath: tempFilePath,
+			fileType: fileType ?? '',
+			showMenu: true,
+			fail: () => { uni.showToast({ title: '文件打开失败', icon: 'none' }) }
+		})
+	})
+}

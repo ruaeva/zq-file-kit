@@ -1,0 +1,10 @@
+/**
+ * zq-file-kit / index.uts
+ *
+ * 统一导出入口。其它项目引入时：
+ *   import { uploadFile, openInBrowser } from '@/zq-file-kit'
+ */
+
+export { uploadFile } from './fileUpload.uts'
+export type { UploadOptions, UploadResult } from './fileUpload.uts'
+export { openInBrowser, downloadToLocal, downloadAndOpen, isRemoteUrl } from './fileDownload.uts'

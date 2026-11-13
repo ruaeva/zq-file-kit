@@ -1,0 +1,145 @@
+/**
+ * zq-file-kit / fileUpload.uts
+ *
+ * 通用文件上传工具（可整体拷贝到其它 uni-app x 项目）。
+ * 核心能力：
+ * 1. content:// URI 自动复制到沙盒再上传（解决 Android 10+ 分区存储下 MIUI 等机型
+ *    直接透传 content:// 给 uploadFile 导致的 Cursor 异常）。
+ * 2. 沙盒文件名用原始文件名，保证后端收到的 multipart filename 与客户选择一致。
+ * 3. 上传 url / header / 字段名全部参数化，不依赖本项目特有的签名逻辑。
+ *
+ * 依赖：仅使用 uni 内置 API（uni.uploadFile / uni.getFileSystemManager / uni.env）。
+ */
+
+export type UploadResult = {
+	/** 后端返回的文件路径（用于回填表单/回显）。 */
+	filePath : string
+	/** 后端返回的完整响应数据（已解析为 JSON 对象）。 */
+	response : UTSJSONObject
+}
+
+export type UploadOptions = {
+	/** 要上传的本地文件路径（支持 content:// URI 或普通绝对路径）。 */
+	filePath : string
+	/** 上传接口完整地址（含协议域名）。 */
+	url : string
+	/** 原始文件名（用于沙盒命名与后端 filename，选填）。 */
+	fileName ?: string | null
+	/** multipart 表单字段名，默认 file。 */
+	fieldName ?: string
+	/** 额外请求头（如签名 Sign、token）。 */
+	header ?: UTSJSONObject
+	/** 额外的表单参数。 */
+	formData ?: UTSJSONObject
+	/** 超时时间（毫秒），默认 120000。 */
+	timeout ?: number
+	/** 允许的扩展名白名单（不含点，小写），留空则不校验。 */
+	allowedExtensions ?: string[]
+	/** 业务成功判定：默认 code == 1；可自定义。 */
+	isSuccess ?: (body : UTSJSONObject) => boolean
+	/** 从响应里取出「文件路径」字段：默认依次尝试 full_path、file、path、url。 */
+	extractPath ?: (body : UTSJSONObject) => string
+}
+
+const DEFAULT_EXTENSIONS : string[] = ['pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx', 'zip', 'rar']
+
+function fileExtension(name : string) : string {
+	const clean = name.split('?')[0].split('#')[0]
+	const sep = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
+	const dot = clean.lastIndexOf('.')
+	if (dot <= sep || dot == clean.length - 1) return ''
+	return clean.substring(dot + 1).toLowerCase()
+}
+
+function isAllowedExtension(options : UploadOptions) : boolean {
+	const list = options.allowedExtensions != null && options.allowedExtensions!.length > 0
+		? options.allowedExtensions!
+		: DEFAULT_EXTENSIONS
+	const name = options.fileName != null && options.fileName!.length > 0 ? options.fileName! : options.filePath
+	return list.indexOf(fileExtension(name)) >= 0
+}
+
+// 把 content:// URI 复制到沙盒，得到 uploadFile 可稳定读取的真实路径。
+function copyToSandbox(filePath : string, fileName : string | null) : Promise<string> {
+	return new Promise<string>((resolve, reject) => {
+		let name = fileName != null && fileName.length > 0 ? fileName! : ''
+		if (name.length == 0) {
+			const suffix = filePath.indexOf('.') > 0 ? filePath.substring(filePath.lastIndexOf('.')) : ''
+			name = 'file_' + Date.now().toString() + suffix
+		}
+		// 沙盒文件名 = 原始文件名；时间戳放在子目录上隔离同名覆盖，不污染文件名。
+		const destPath = uni.env.CACHE_PATH + '/upload_' + Date.now().toString() + '/' + name
+		uni.getFileSystemManager().copyFile({
+			srcPath: filePath,
+			destPath: destPath,
+			success: () => {
+				console.log('[zq-upload] content:// 已复制到沙盒', { src: filePath, dest: destPath })
+				resolve(destPath)
+			},
+			fail: (error) => {
+				console.error('[zq-upload] content:// 复制到沙盒失败', { src: filePath, errMsg: error.errMsg })
+				reject(new Error('文件读取失败，请重试'))
+			}
+		})
+	})
+}
+
+/** 上传单个文件，返回后端文件路径。 */
+export function uploadFile(options : UploadOptions) : Promise<UploadResult> {
+	if (!isAllowedExtension(options)) {
+		return Promise.reject(new Error('不支持的文件格式'))
+	}
+	// content:// 先复制到沙盒；普通路径直接上传。
+	const prepare : Promise<string> = options.filePath.indexOf('content://') == 0
+		? copyToSandbox(options.filePath, options.fileName ?? null)
+		: Promise.resolve(options.filePath)
+
+	return prepare.then((uploadPath : string) : Promise<UploadResult> => new Promise<UploadResult>((resolve, reject) => {
+		const header : UTSJSONObject = options.header ?? {}
+		uni.uploadFile({
+			url: options.url,
+			filePath: uploadPath,
+			name: options.fieldName ?? 'file',
+			header: header,
+			formData: options.formData ?? {},
+			timeout: options.timeout ?? 120000,
+			success: (response) => {
+				if (response.statusCode < 200 || response.statusCode >= 300) {
+					reject(new Error('上传失败: HTTP ' + response.statusCode.toString()))
+					return
+				}
+				let body : UTSJSONObject | null = null
+				try {
+					body = JSON.parseObject(response.data)
+				} catch (_error) {
+					reject(new Error('上传接口未返回有效 JSON'))
+					return
+				}
+				if (body == null) {
+					reject(new Error('上传接口返回数据为空'))
+					return
+				}
+				const ok = options.isSuccess != null ? options.isSuccess!(body) : body.getNumber('code') == 1
+				if (!ok) {
+					reject(new Error(body.getString('msg') ?? '上传失败'))
+					return
+				}
+				let filePath = ''
+				if (options.extractPath != null) {
+					filePath = options.extractPath!(body)
+				} else {
+					filePath = body.getString('full_path') ?? body.getString('file') ?? body.getString('path') ?? body.getString('url') ?? ''
+				}
+				if (filePath.length == 0) {
+					reject(new Error('上传接口未返回文件地址'))
+					return
+				}
+				resolve({ filePath: filePath, response: body })
+			},
+			fail: (error) => {
+				console.error('[zq-upload] 网络请求失败', { url: options.url, errMsg: error.errMsg })
+				reject(new Error(error.errMsg))
+			}
+		})
+	}))
+}
